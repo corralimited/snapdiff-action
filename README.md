@@ -1,8 +1,8 @@
 # SnapDiff GitHub Action
 
-URL-based visual regression testing for any deployed site. Captures pages, diffs against baselines, gates merges via a `snapdiff/visual-test` commit status.
+URL-based visual regression testing for deployed sites. Captures pages, compares them against baselines, and gates merges through a `snapdiff/visual-test` commit status.
 
-> Pairs with [`@corralimited/snapdiff-playwright`](https://www.npmjs.com/package/@corralimited/snapdiff-playwright) — use the action for unauthenticated routes (marketing sites, docs, public dashboards) and the Playwright reporter for routes behind a login. Both modes write to the same SnapDiff project, so you get one set of baselines and one review UI no matter where each page comes from.
+Use this action for public routes. For routes behind authentication, pair it with [`@corralimited/snapdiff-playwright`](https://www.npmjs.com/package/@corralimited/snapdiff-playwright). Both write to the same SnapDiff project, so baselines and reviews stay unified.
 
 ## Quickstart
 
@@ -34,22 +34,23 @@ jobs:
             about=/about
 ```
 
-That's the entire setup. The action auto-discovers the preview URL from your host's GitHub deployment statuses (Vercel, Netlify, Cloudflare Pages, AWS Amplify — anything that writes them).
+The action discovers the preview URL from GitHub deployment statuses written by your host (Vercel, Netlify, Cloudflare Pages, AWS Amplify, Render, and others).
 
 ## Inputs
 
 | Name | Required | Default | Description |
 | --- | --- | --- | --- |
 | `api-key` | yes | — | SnapDiff API key (`sd_live_xxx` or `sd_test_xxx`) |
-| `project` | yes | — | SnapDiff project slug or id |
+| `project` | yes | — | SnapDiff project slug or ID |
 | `pages` | yes | — | Pages to test, one per line in `name=path` or `name=url` format |
 | `api-url` | no | `https://api.snapdiff.dev` | Override for self-hosted SnapDiff |
-| `preview-url` | no | (auto) | Skip auto-discovery and use this base URL |
-| `preview-environment` | no | `preview` on PR, `production` on push | Substring filter for matching the GitHub deployment environment name |
-| `preview-timeout` | no | `10` | Max minutes to wait for the deployment to become available |
-| `github-token` | no | `${{ github.token }}` | Token for reading deployment statuses |
+| `preview-url` | no | auto | Skip discovery and use this base URL |
+| `preview-environment` | no | `preview` on PR, `production` on push | Substring filter for the GitHub deployment environment name |
+| `preview-timeout` | no | `10` | Maximum minutes to wait for the deployment |
+| `extra-headers` | no | — | HTTP headers applied to every page capture, one per line as `Key: value`. See [Authentication on protected previews](#authentication-on-protected-previews). |
+| `github-token` | no | `${{ github.token }}` | Token used to read deployment statuses |
 | `wait` | no | `true` | Poll the build to completion before exiting |
-| `wait-timeout` | no | `5` | Max minutes to wait for the build |
+| `wait-timeout` | no | `5` | Maximum minutes to wait for the build |
 
 ## Pages input
 
@@ -62,9 +63,7 @@ docs=/docs
 external=https://other-host.com/page
 ```
 
-- Paths (starting with `/`) are resolved against the auto-discovered preview/production URL.
-- Full URLs are used as-is.
-- If every page is a full URL, auto-discovery is skipped — useful for hosts that don't write GitHub deployments (GitHub Pages, FTP-deployed sites, etc.).
+Paths beginning with `/` are resolved against the discovered preview or production URL. Full URLs are used as supplied. When every entry is a full URL, the action skips discovery, which is useful for hosts that do not publish GitHub deployments such as GitHub Pages or sites deployed over FTP.
 
 ## Outputs
 
@@ -74,37 +73,78 @@ external=https://other-host.com/page
 | `status` | `approved`, `changes_requested`, or `failed` |
 | `changed-count` | Number of pages with visual changes |
 | `review-url` | Dashboard URL for reviewing the build |
-| `preview-url` | The base URL discovered (or the explicit override) |
+| `preview-url` | Discovered base URL, or the explicit override |
 
-## How the merge gate actually works
+## Authentication on protected previews
 
-When visual changes are detected, **the workflow itself does not fail** — it stays green. SnapDiff posts a separate commit status named `snapdiff/visual-test` directly via the GitHub API. That status's lifecycle:
+Hosts like Vercel, Cloudflare Access, and AWS Amplify can lock down preview deployments behind authentication. SnapDiff's headless browser will hit the login wall instead of your page unless you give it a way through. Use `extra-headers` to pass a bypass token.
 
-- 🟡 **pending** — build is processing, or changes detected and awaiting review
-- ✅ **success** — no changes, or all changes accepted in the dashboard
-- ❌ **error** — build failed (real error, not a visual regression)
+### Vercel Deployment Protection
 
-In your repo's branch protection rules, **require the `snapdiff/visual-test` status** to pass. Pending = merge button greyed out. The reviewer opens the dashboard, accepts (becomes a new baseline) or rejects (must fix the code). On accept, the status flips to ✅ and merge unblocks.
+Vercel has a first-party feature for this called **Protection Bypass for Automation**.
 
-This mirrors how Chromatic and Argos work — visual changes are a "needs review" gate, not a "failure".
+1. **Vercel project → Settings → Deployment Protection** → enable **Protection Bypass for Automation** → generate a secret.
+2. Add the secret to your GitHub repo secrets as `VERCEL_BYPASS_SECRET`.
+3. Pass it via `extra-headers`:
 
-To enable: in the SnapDiff dashboard for your project, add a GitHub repo + PAT under integrations. The PAT needs `repo:status` scope on the repo you want SnapDiff to post to.
+   ```yaml
+   - uses: corralimited/snapdiff-action@v1
+     with:
+       api-key: ${{ secrets.SNAPDIFF_API_KEY }}
+       project: my-project
+       pages: |
+         home=/
+         pricing=/pricing
+       extra-headers: |
+         x-vercel-protection-bypass: ${{ secrets.VERCEL_BYPASS_SECRET }}
+         x-vercel-set-bypass-cookie: true
+   ```
 
-## Auto-discovery requirements
+The header sets a session cookie on first hit, so subsequent assets (CSS, fonts, images) load without re-authenticating — important for full-page captures. Header values are not stored in the SnapDiff database.
 
-Auto-discovery uses GitHub's Deployments API, which most modern hosts populate automatically:
+Reference: [Vercel Protection Bypass for Automation](https://vercel.com/docs/deployment-protection/methods-to-bypass-deployment-protection/protection-bypass-automation).
 
-| Host | Auto-discovery | Notes |
+### Cloudflare Access
+
+Use a service token. In the Cloudflare dashboard create a service token, then pass the resulting `CF-Access-Client-Id` and `CF-Access-Client-Secret`:
+
+```yaml
+extra-headers: |
+  CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+  CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+```
+
+### Basic auth, custom tokens, IP allowlist headers
+
+Any host that accepts a static header for authentication works the same way — drop the header into `extra-headers`.
+
+## Merge gating
+
+When visual changes are detected, the workflow does not fail. Instead, SnapDiff posts a separate commit status named `snapdiff/visual-test` through the GitHub API:
+
+- **pending** — the build is processing, or changes are awaiting review
+- **success** — no changes detected, or all changes have been approved in the dashboard
+- **error** — the build failed for reasons unrelated to visual differences
+
+Add `snapdiff/visual-test` as a required check in your branch protection rules. While the status is pending, the merge button is blocked. A reviewer opens the dashboard to approve changes (which become the new baseline) or reject them. Once approved, the status updates to success and the merge is unblocked.
+
+To enable status posting, connect a GitHub repository and personal access token under Integrations in the SnapDiff dashboard. The token requires the `repo:status` scope.
+
+## Auto-discovery support
+
+Auto-discovery relies on the GitHub Deployments API, which is populated by most modern hosts:
+
+| Host | Supported | Notes |
 | --- | --- | --- |
-| Vercel | ✅ | Both push and PR |
-| Netlify | ✅ | Both push and PR |
-| Cloudflare Pages | ✅ | Both push and PR |
-| AWS Amplify | ✅ | Both push and PR |
-| Render | ✅ | Both push and PR |
-| GitHub Pages | ❌ | No PR previews. Use full URLs in `pages` to skip discovery. |
-| FTP / custom | varies | Use full URLs or set `preview-url` |
+| Vercel | yes | Push and pull request |
+| Netlify | yes | Push and pull request |
+| Cloudflare Pages | yes | Push and pull request |
+| AWS Amplify | yes | Push and pull request |
+| Render | yes | Push and pull request |
+| GitHub Pages | no | No pull request previews. Use full URLs in `pages`. |
+| FTP / custom | varies | Use full URLs, or set `preview-url` explicitly |
 
-If your host doesn't write GitHub deployments, supply a static `preview-url` or use full URLs in `pages` — the action will skip discovery and use them as-is.
+If your host does not publish GitHub deployments, provide a static `preview-url` or use full URLs in the `pages` input.
 
 ## License
 

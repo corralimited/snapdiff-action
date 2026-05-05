@@ -29,6 +29,18 @@ inputs:
     description: 'Override auto-discovery with an explicit base URL (e.g. https://staging.myapp.com). Useful if your host does not write GitHub deployment statuses.'
     required: false
     default: ''
+  extra-headers:
+    description: |
+      HTTP headers to apply to every page capture, one per line in `Key: value`
+      format. Used to authenticate against protected previews — Vercel
+      Deployment Protection bypass, Cloudflare Access, basic auth, etc. Header
+      values are not stored in the SnapDiff database.
+
+      Example (Vercel Protection Bypass for Automation):
+        x-vercel-protection-bypass: ${{ secrets.VERCEL_BYPASS_SECRET }}
+        x-vercel-set-bypass-cookie: true
+    required: false
+    default: ''
   preview-environment:
     description: |
       Substring filter to match the GitHub deployment environment name (case-insensitive).
@@ -180,6 +192,34 @@ runs:
         echo "pages_json=$PAGES_JSON" >> "$GITHUB_OUTPUT"
         echo "::notice::Snapping pages against $SD_PREVIEW_URL"
 
+    - name: Parse extra headers
+      id: parse-headers
+      shell: bash
+      env:
+        SD_HEADERS_INPUT: ${{ inputs.extra-headers }}
+      run: |
+        # Convert "Key: value" lines into a compact JSON object. Lines without
+        # a colon, or with empty key/value, are skipped. The resulting JSON is
+        # safe to embed in $GITHUB_OUTPUT (single line).
+        if [ -z "$SD_HEADERS_INPUT" ]; then
+          echo "headers_json=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        HEADERS_JSON=$(printf '%s\n' "$SD_HEADERS_INPUT" | awk -F: '
+          /:/ {
+            key = $1
+            sub(/^[ \t]+|[ \t]+$/, "", key)
+            value = substr($0, index($0, ":") + 1)
+            sub(/^[ \t]+|[ \t]+$/, "", value)
+            if (key != "" && value != "") {
+              gsub(/"/, "\\\"", key)
+              gsub(/"/, "\\\"", value)
+              print "{\"" key "\":\"" value "\"}"
+            }
+          }
+        ' | jq -sc 'add // {}')
+        echo "headers_json=$HEADERS_JSON" >> "$GITHUB_OUTPUT"
+
     - name: Create build
       id: create-build
       shell: bash
@@ -189,6 +229,7 @@ runs:
         SD_COMMIT_MSG: ${{ github.event.pull_request.title || github.event.head_commit.message }}
         SD_PR_URL: ${{ github.event.pull_request.html_url }}
         SD_PAGES_JSON: ${{ steps.parse-pages.outputs.pages_json }}
+        SD_HEADERS_JSON: ${{ steps.parse-headers.outputs.headers_json }}
       run: |
         # Build the request body via jq so commit messages with quotes/backticks
         # can't break out of the shell context, and so we omit pull_request_url
@@ -199,13 +240,15 @@ runs:
           --arg msg "$SD_COMMIT_MSG" \
           --arg pr "$SD_PR_URL" \
           --argjson pages "$SD_PAGES_JSON" \
+          --argjson headers "${SD_HEADERS_JSON:-{}}" \
           '{
             branch: $branch,
             commit_sha: $sha,
             pages: $pages
           }
-          + (if $msg != "" then {commit_message: $msg} else {} end)
-          + (if $pr  != "" then {pull_request_url: $pr} else {} end)')
+          + (if $msg     != "" then {commit_message: $msg} else {} end)
+          + (if $pr      != "" then {pull_request_url: $pr} else {} end)
+          + (if ($headers | length) > 0 then {headers: $headers} else {} end)')
 
         RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
           "${{ inputs.api-url }}/v1/projects/${{ inputs.project }}/builds" \
