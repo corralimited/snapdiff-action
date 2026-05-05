@@ -30,15 +30,7 @@ inputs:
     required: false
     default: ''
   extra-headers:
-    description: |
-      HTTP headers to apply to every page capture, one per line in `Key: value`
-      format. Used to authenticate against protected previews — Vercel
-      Deployment Protection bypass, Cloudflare Access, basic auth, etc. Header
-      values are not stored in the SnapDiff database.
-
-      Example (Vercel Protection Bypass for Automation):
-        x-vercel-protection-bypass: ${{ secrets.VERCEL_BYPASS_SECRET }}
-        x-vercel-set-bypass-cookie: true
+    description: 'HTTP headers applied to every page capture, one per line as `Key: value`. Used to authenticate against protected previews (Vercel Protection Bypass, Cloudflare Access, basic auth, etc). Header values are not stored in the SnapDiff database. See README for examples.'
     required: false
     default: ''
   preview-environment:
