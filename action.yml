@@ -223,6 +223,12 @@ runs:
         SD_PAGES_JSON: ${{ steps.parse-pages.outputs.pages_json }}
         SD_HEADERS_JSON: ${{ steps.parse-headers.outputs.headers_json }}
       run: |
+        # `${VAR:-{}}` looks fine but bash matches the first `}` to close the
+        # expansion, so when SD_HEADERS_JSON is set the result is `<value>}`
+        # — a trailing literal `}`. Use a regular if-empty check instead.
+        HEADERS_JSON="$SD_HEADERS_JSON"
+        if [ -z "$HEADERS_JSON" ]; then HEADERS_JSON='{}'; fi
+
         # Build the request body via jq so commit messages with quotes/backticks
         # can't break out of the shell context, and so we omit pull_request_url
         # entirely when it's empty (the API rejects "" via z.string().url()).
@@ -232,7 +238,7 @@ runs:
           --arg msg "$SD_COMMIT_MSG" \
           --arg pr "$SD_PR_URL" \
           --argjson pages "$SD_PAGES_JSON" \
-          --argjson headers "${SD_HEADERS_JSON:-{}}" \
+          --argjson headers "$HEADERS_JSON" \
           '{
             branch: $branch,
             commit_sha: $sha,
