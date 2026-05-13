@@ -24,13 +24,13 @@ inputs:
   api-url:
     description: 'SnapDiff API base URL'
     required: false
-    default: 'https://api.snapdiff.dev'
+    default: 'https://api.snapdiff.ai'
   preview-url:
-    description: 'Override auto-discovery with an explicit base URL (e.g. https://staging.myapp.com). Useful if your host does not write GitHub deployment statuses.'
+    description: 'Override auto-discovery with an explicit base URL (e.g. https://staging.myapp.com). Use this if your host does not write GitHub deployment statuses.'
     required: false
     default: ''
   extra-headers:
-    description: 'HTTP headers applied to every page capture, one per line as `Key: value`. Used to authenticate against protected previews (Vercel Protection Bypass, Cloudflare Access, basic auth, etc). Header values are not stored in the SnapDiff database. See README for examples.'
+    description: 'HTTP headers applied to every page capture, one per line as `Key: value`. Use to authenticate against protected previews (Vercel Protection Bypass, Cloudflare Access, basic auth, etc.). Header values are sent only on the capture request and never persisted in SnapDiff.'
     required: false
     default: ''
   preview-environment:
@@ -41,26 +41,38 @@ inputs:
     required: false
     default: ''
   preview-timeout:
-    description: 'Maximum minutes to wait for the preview deployment to become available (default: 10)'
+    description: 'Maximum minutes to wait for the preview deployment to become available'
     required: false
     default: '10'
+  viewport-width:
+    description: 'Viewport width in CSS pixels'
+    required: false
+    default: '1280'
+  viewport-height:
+    description: 'Viewport height in CSS pixels'
+    required: false
+    default: '720'
+  full-page:
+    description: 'Capture the entire scrollable page instead of just the viewport'
+    required: false
+    default: 'false'
   github-token:
-    description: 'Token used to read deployment statuses. Defaults to the workflow GITHUB_TOKEN, which has read access by default.'
+    description: 'Token used to read deployment statuses. Defaults to the workflow GITHUB_TOKEN.'
     required: false
     default: ${{ github.token }}
   wait:
-    description: 'Wait for build to complete and report results (default: true)'
+    description: 'Wait for the build to finish diffing and report results'
     required: false
     default: 'true'
   wait-timeout:
-    description: 'Maximum minutes to wait for build completion (default: 5)'
+    description: 'Maximum minutes to wait for build completion'
     required: false
     default: '5'
 
 outputs:
   build-id:
     description: 'The SnapDiff build ID'
-    value: ${{ steps.create-build.outputs.build_id }}
+    value: ${{ steps.capture-and-build.outputs.build_id }}
   status:
     description: 'Build status (approved, changes_requested, failed)'
     value: ${{ steps.poll-build.outputs.status }}
@@ -68,8 +80,8 @@ outputs:
     description: 'Number of pages with visual changes'
     value: ${{ steps.poll-build.outputs.changed_count }}
   review-url:
-    description: 'URL to review the build'
-    value: ${{ steps.create-build.outputs.review_url }}
+    description: 'URL to review the build in the SnapDiff dashboard'
+    value: ${{ steps.capture-and-build.outputs.review_url }}
   preview-url:
     description: 'The base URL that was discovered (or the explicit preview-url input)'
     value: ${{ steps.discover-preview.outputs.preview_url }}
@@ -90,18 +102,15 @@ runs:
         SD_EVENT: ${{ github.event_name }}
         SD_PAGES_INPUT: ${{ inputs.pages }}
       run: |
-        # If the user passed an explicit preview-url, skip discovery.
         if [ -n "$SD_PREVIEW_URL_OVERRIDE" ]; then
           echo "Using explicit preview-url: $SD_PREVIEW_URL_OVERRIDE"
           echo "preview_url=${SD_PREVIEW_URL_OVERRIDE%/}" >> "$GITHUB_OUTPUT"
           exit 0
         fi
 
-        # If every page is a fully-qualified URL (http/https), discovery is
-        # unnecessary — the URLs go straight through as-is. This makes the
-        # action work for hosts that don't write GitHub Deployments (GitHub
-        # Pages, FTP-deployed marketing sites, etc.) so long as the customer
-        # provides absolute URLs.
+        # If every page is already an absolute URL, deployment discovery is
+        # unnecessary — lets the action work for hosts that don't write
+        # GitHub deployments (GH Pages, static hosting, FTP, etc).
         NON_URL_PAGES=$(printf '%s\n' "$SD_PAGES_INPUT" | awk -F= '/=/ {sub(/^[ \t]+/, "", $2); print $2}' | grep -v '^https\?://' | grep -v '^[[:space:]]*$' || true)
         if [ -z "$NON_URL_PAGES" ]; then
           echo "All pages are absolute URLs — skipping deployment discovery."
@@ -109,7 +118,6 @@ runs:
           exit 0
         fi
 
-        # Pick environment filter: "preview" on PRs, "production" otherwise — unless overridden.
         if [ -n "$SD_ENVIRONMENT_OVERRIDE" ]; then
           ENV_FILTER="$SD_ENVIRONMENT_OVERRIDE"
         elif [ "$SD_EVENT" = "pull_request" ]; then
@@ -124,7 +132,6 @@ runs:
         MAX_ATTEMPTS=$(( SD_TIMEOUT_MIN * 6 ))  # 10s per attempt
         PREVIEW_URL=""
         for i in $(seq 1 $MAX_ATTEMPTS); do
-          # GitHub returns deployments in reverse chronological order.
           DEPLOYMENTS=$(gh api "/repos/$SD_REPO/deployments?sha=$SD_SHA&per_page=30" 2>/dev/null || echo '[]')
           COUNT=$(echo "$DEPLOYMENTS" | jq 'length')
 
@@ -167,9 +174,6 @@ runs:
         SD_PAGES_INPUT: ${{ inputs.pages }}
         SD_PREVIEW_URL: ${{ steps.discover-preview.outputs.preview_url }}
       run: |
-        # Convert "name=path" or "name=url" lines into a compact JSON array.
-        # Paths (starting with /) get the discovered preview URL prepended.
-        # Full URLs (http:// or https://) are used as-is.
         PAGES_JSON=$(printf '%s\n' "$SD_PAGES_INPUT" | grep '=' | while IFS='=' read -r name target; do
           name=$(echo "$name" | xargs)
           target=$(echo "$target" | xargs)
@@ -182,7 +186,9 @@ runs:
           echo "{\"name\":\"$name\",\"url\":\"$url\"}"
         done | jq -sc '.')
         echo "pages_json=$PAGES_JSON" >> "$GITHUB_OUTPUT"
-        echo "::notice::Snapping pages against $SD_PREVIEW_URL"
+        if [ -n "$SD_PREVIEW_URL" ]; then
+          echo "::notice::Snapping pages against $SD_PREVIEW_URL"
+        fi
 
     - name: Parse extra headers
       id: parse-headers
@@ -190,9 +196,6 @@ runs:
       env:
         SD_HEADERS_INPUT: ${{ inputs.extra-headers }}
       run: |
-        # Convert "Key: value" lines into a compact JSON object. Lines without
-        # a colon, or with empty key/value, are skipped. The resulting JSON is
-        # safe to embed in $GITHUB_OUTPUT (single line).
         if [ -z "$SD_HEADERS_INPUT" ]; then
           echo "headers_json=" >> "$GITHUB_OUTPUT"
           exit 0
@@ -212,104 +215,81 @@ runs:
         ' | jq -sc 'add // {}')
         echo "headers_json=$HEADERS_JSON" >> "$GITHUB_OUTPUT"
 
-    - name: Create build
-      id: create-build
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+
+    - name: Install Playwright Chromium
       shell: bash
+      working-directory: ${{ github.action_path }}/runtime
+      run: |
+        npm install --no-audit --no-fund --silent
+        npx playwright install --with-deps chromium
+
+    - name: Capture & create build
+      id: capture-and-build
+      shell: bash
+      working-directory: ${{ github.action_path }}/runtime
       env:
+        SD_API_URL: ${{ inputs.api-url }}
+        SD_API_KEY: ${{ inputs.api-key }}
+        SD_PROJECT: ${{ inputs.project }}
+        SD_PAGES_JSON: ${{ steps.parse-pages.outputs.pages_json }}
+        SD_HEADERS_JSON: ${{ steps.parse-headers.outputs.headers_json }}
+        SD_VIEWPORT_WIDTH: ${{ inputs.viewport-width }}
+        SD_VIEWPORT_HEIGHT: ${{ inputs.viewport-height }}
+        SD_FULL_PAGE: ${{ inputs.full-page }}
         SD_BRANCH: ${{ github.head_ref || github.ref_name }}
         SD_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         SD_COMMIT_MSG: ${{ github.event.pull_request.title || github.event.head_commit.message }}
         SD_PR_URL: ${{ github.event.pull_request.html_url }}
-        SD_PAGES_JSON: ${{ steps.parse-pages.outputs.pages_json }}
-        SD_HEADERS_JSON: ${{ steps.parse-headers.outputs.headers_json }}
-      run: |
-        # `${VAR:-{}}` looks fine but bash matches the first `}` to close the
-        # expansion, so when SD_HEADERS_JSON is set the result is `<value>}`
-        # — a trailing literal `}`. Use a regular if-empty check instead.
-        HEADERS_JSON="$SD_HEADERS_JSON"
-        if [ -z "$HEADERS_JSON" ]; then HEADERS_JSON='{}'; fi
-
-        # Build the request body via jq so commit messages with quotes/backticks
-        # can't break out of the shell context, and so we omit pull_request_url
-        # entirely when it's empty (the API rejects "" via z.string().url()).
-        BODY=$(jq -n \
-          --arg branch "$SD_BRANCH" \
-          --arg sha "$SD_COMMIT_SHA" \
-          --arg msg "$SD_COMMIT_MSG" \
-          --arg pr "$SD_PR_URL" \
-          --argjson pages "$SD_PAGES_JSON" \
-          --argjson headers "$HEADERS_JSON" \
-          '{
-            branch: $branch,
-            commit_sha: $sha,
-            pages: $pages
-          }
-          + (if $msg     != "" then {commit_message: $msg} else {} end)
-          + (if $pr      != "" then {pull_request_url: $pr} else {} end)
-          + (if ($headers | length) > 0 then {headers: $headers} else {} end)')
-
-        RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-          "${{ inputs.api-url }}/v1/projects/${{ inputs.project }}/builds" \
-          -H "Content-Type: application/json" \
-          -H "X-API-Key: ${{ inputs.api-key }}" \
-          -d "$BODY")
-
-        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-        BODY=$(echo "$RESPONSE" | head -n -1)
-
-        if [ "$HTTP_CODE" != "202" ]; then
-          echo "::error::SnapDiff API returned $HTTP_CODE: $BODY"
-          exit 1
-        fi
-
-        BUILD_ID=$(echo "$BODY" | jq -r '.id')
-        POLL_URL=$(echo "$BODY" | jq -r '.poll_url')
-        echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
-        echo "poll_url=$POLL_URL" >> $GITHUB_OUTPUT
-        echo "review_url=${{ inputs.api-url }}/dashboard/builds/$BUILD_ID" >> $GITHUB_OUTPUT
-        echo "::notice::SnapDiff build created: $BUILD_ID"
+      run: node capture-and-build.mjs
 
     - name: Wait for build completion
       id: poll-build
       if: inputs.wait == 'true'
       shell: bash
+      env:
+        SD_API_URL: ${{ inputs.api-url }}
+        SD_API_KEY: ${{ inputs.api-key }}
+        SD_BUILD_ID: ${{ steps.capture-and-build.outputs.build_id }}
+        SD_PROJECT: ${{ inputs.project }}
+        SD_WAIT_TIMEOUT: ${{ inputs.wait-timeout }}
+        SD_REVIEW_URL: ${{ steps.capture-and-build.outputs.review_url }}
       run: |
-        BUILD_ID="${{ steps.create-build.outputs.build_id }}"
-        POLL_URL="${{ inputs.api-url }}${{ steps.create-build.outputs.poll_url }}"
         # 12 polls per minute (5s interval) × wait-timeout minutes
-        MAX_ATTEMPTS=$(( ${{ inputs.wait-timeout }} * 12 ))
+        MAX_ATTEMPTS=$(( SD_WAIT_TIMEOUT * 12 ))
         ATTEMPT=0
+        POLL_URL="${SD_API_URL}/v1/projects/${SD_PROJECT}/builds/${SD_BUILD_ID}"
 
-        echo "Waiting for build $BUILD_ID to complete (timeout: ${{ inputs.wait-timeout }}m)..."
+        echo "Waiting for build $SD_BUILD_ID to complete (timeout: ${SD_WAIT_TIMEOUT}m)..."
 
         while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
           ATTEMPT=$((ATTEMPT + 1))
           sleep 5
 
-          RESPONSE=$(curl -s "$POLL_URL" -H "X-API-Key: ${{ inputs.api-key }}")
+          RESPONSE=$(curl -s "$POLL_URL" -H "X-API-Key: ${SD_API_KEY}")
           STATUS=$(echo "$RESPONSE" | jq -r '.status')
 
           if [ "$STATUS" = "approved" ]; then
-            TOTAL=$(echo "$RESPONSE" | jq -r '.total_snapshots')
-            echo "status=approved" >> $GITHUB_OUTPUT
-            echo "changed_count=0" >> $GITHUB_OUTPUT
-            echo "::notice::✅ All $TOTAL pages match baselines — no visual changes"
+            TOTAL=$(echo "$RESPONSE" | jq -r '.total_snapshots // 0')
+            echo "status=approved" >> "$GITHUB_OUTPUT"
+            echo "changed_count=0" >> "$GITHUB_OUTPUT"
+            echo "::notice::All $TOTAL pages match baselines — no visual changes"
             exit 0
           elif [ "$STATUS" = "changes_requested" ]; then
-            CHANGED=$(echo "$RESPONSE" | jq -r '.changed_count')
-            TOTAL=$(echo "$RESPONSE" | jq -r '.total_snapshots')
-            echo "status=changes_requested" >> $GITHUB_OUTPUT
-            echo "changed_count=$CHANGED" >> $GITHUB_OUTPUT
-            echo "::notice::🔍 $CHANGED of $TOTAL pages changed — pending review at ${{ steps.create-build.outputs.review_url }}"
-            # Exit 0 — the merge gate is the `snapdiff/visual-test` commit
-            # status (set to "pending" by SnapDiff via the GitHub API), not the
-            # workflow check itself. Workflow stays green; merge stays blocked
-            # via the pending status until a reviewer accepts in the dashboard.
+            CHANGED=$(echo "$RESPONSE" | jq -r '.changed_count // 0')
+            TOTAL=$(echo "$RESPONSE" | jq -r '.total_snapshots // 0')
+            echo "status=changes_requested" >> "$GITHUB_OUTPUT"
+            echo "changed_count=$CHANGED" >> "$GITHUB_OUTPUT"
+            echo "::notice::$CHANGED of $TOTAL pages changed — pending review at $SD_REVIEW_URL"
+            # Workflow stays green; merge gating is the `snapdiff/visual-test`
+            # commit status set on the PR head SHA via the GitHub API.
             exit 0
           elif [ "$STATUS" = "failed" ]; then
-            echo "status=failed" >> $GITHUB_OUTPUT
-            echo "changed_count=0" >> $GITHUB_OUTPUT
-            echo "::error::❌ Visual regression test failed"
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "changed_count=0" >> "$GITHUB_OUTPUT"
+            echo "::error::Visual regression test failed"
             exit 1
           fi
 

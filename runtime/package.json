@@ -1,0 +1,11 @@
+{
+  "name": "snapdiff-action-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright runtime for the SnapDiff Visual Test action. Installed at action runtime; not published to npm.",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "playwright": "1.59.1"
+  }
+}

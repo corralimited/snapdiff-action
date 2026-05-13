@@ -1,0 +1,15 @@
+name: Visual Regression Test
+on: pull_request
+
+jobs:
+  visual-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: corralimited/snapdiff-action@v1
+        with:
+          api-key: ${{ secrets.SNAPDIFF_API_KEY }}
+          project: my-site
+          pages: |
+            homepage=/
+            pricing=/pricing
+            dashboard=/dashboard

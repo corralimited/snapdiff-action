@@ -1,151 +1,148 @@
-# SnapDiff GitHub Action
+# SnapDiff Visual Test Action
 
-URL-based visual regression testing for deployed sites. Captures pages, compares them against baselines, and gates merges through a `snapdiff/visual-test` commit status.
-
-Use this action for public routes. For routes behind authentication, pair it with [`@corralimited/snapdiff-playwright`](https://www.npmjs.com/package/@corralimited/snapdiff-playwright). Both write to the same SnapDiff project, so baselines and reviews stay unified.
-
-## Quickstart
+Run visual regression tests with [SnapDiff](https://snapdiff.ai) from your GitHub Actions workflow. Auto-discovers your preview URL from GitHub deployment statuses (Vercel, Netlify, Cloudflare Pages, anything that writes deployments), captures every page you list, and posts the result as a PR commit status.
 
 ```yaml
-# .github/workflows/visual.yml
-name: Visual diff
-
-on:
-  pull_request:
-  push:
-    branches: [main]
+# .github/workflows/visual-test.yml
+name: Visual Regression
+on: pull_request
 
 jobs:
   visual:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      deployments: read
-      pull-requests: read
     steps:
-      - uses: actions/checkout@v4
       - uses: corralimited/snapdiff-action@v1
         with:
           api-key: ${{ secrets.SNAPDIFF_API_KEY }}
-          project: my-project-slug
+          project: my-site
           pages: |
             homepage=/
             pricing=/pricing
-            about=/about
+            dashboard=/dashboard
 ```
 
-The action discovers the preview URL from GitHub deployment statuses written by your host (Vercel, Netlify, Cloudflare Pages, AWS Amplify, Render, and others).
+That's it. No `VERCEL_TOKEN`, no `vercel/preview-url` polling step, no Playwright config to write.
 
-## Inputs
+## Setup
 
-| Name | Required | Default | Description |
-| --- | --- | --- | --- |
-| `api-key` | yes | — | SnapDiff API key (`sd_live_xxx` or `sd_test_xxx`) |
-| `project` | yes | — | SnapDiff project slug or ID |
-| `pages` | yes | — | Pages to test, one per line in `name=path` or `name=url` format |
-| `api-url` | no | `https://api.snapdiff.dev` | Override for self-hosted SnapDiff |
-| `preview-url` | no | auto | Skip discovery and use this base URL |
-| `preview-environment` | no | `preview` on PR, `production` on push | Substring filter for the GitHub deployment environment name |
-| `preview-timeout` | no | `10` | Maximum minutes to wait for the deployment |
-| `extra-headers` | no | — | HTTP headers applied to every page capture, one per line as `Key: value`. See [Authentication on protected previews](#authentication-on-protected-previews). |
-| `github-token` | no | `${{ github.token }}` | Token used to read deployment statuses |
-| `wait` | no | `true` | Poll the build to completion before exiting |
-| `wait-timeout` | no | `5` | Maximum minutes to wait for the build |
+1. Sign up at [snapdiff.ai/signup](https://snapdiff.ai/signup) and grab an API key.
+2. Create a project in the dashboard (or via API). Note the **slug** — you'll reference it in `project:` below.
+3. Add `SNAPDIFF_API_KEY` to your repository secrets at **Settings → Secrets and variables → Actions**.
+4. Drop the workflow above into `.github/workflows/visual-test.yml`.
 
-## Pages input
+The first PR creates baselines; subsequent PRs diff against them.
 
-Each line is `name=path` or `name=url`:
+## How the preview URL is discovered
 
+The action reads GitHub's [deployments API](https://docs.github.com/en/rest/deployments) for the PR's commit, finds the most recent deployment whose environment matches `preview` (case-insensitive) and whose status is `success`, and uses its `environment_url` as the base for any path-style `pages:` entries.
+
+This means Vercel, Netlify, Cloudflare Pages, and Render all work out of the box — they all write `deployment` events to GitHub on every preview build.
+
+If your host doesn't write deployments, pass `preview-url:` explicitly:
+
+```yaml
+- uses: corralimited/snapdiff-action@v1
+  with:
+    api-key: ${{ secrets.SNAPDIFF_API_KEY }}
+    project: my-site
+    preview-url: https://staging.myapp.com
+    pages: |
+      homepage=/
+      pricing=/pricing
 ```
-homepage=/
-pricing=/pricing
-docs=/docs
-external=https://other-host.com/page
+
+Or use absolute URLs in `pages:` directly (skips discovery for those pages):
+
+```yaml
+pages: |
+  homepage=https://staging.myapp.com/
+  external=https://other-host.com/page
 ```
-
-Paths beginning with `/` are resolved against the discovered preview or production URL. Full URLs are used as supplied. When every entry is a full URL, the action skips discovery, which is useful for hosts that do not publish GitHub deployments such as GitHub Pages or sites deployed over FTP.
-
-## Outputs
-
-| Name | Description |
-| --- | --- |
-| `build-id` | The SnapDiff build ID |
-| `status` | `approved`, `changes_requested`, or `failed` |
-| `changed-count` | Number of pages with visual changes |
-| `review-url` | Dashboard URL for reviewing the build |
-| `preview-url` | Discovered base URL, or the explicit override |
 
 ## Authentication on protected previews
 
-Hosts like Vercel, Cloudflare Access, and AWS Amplify can lock down preview deployments behind authentication. SnapDiff's headless browser will hit the login wall instead of your page unless you give it a way through. Use `extra-headers` to pass a bypass token.
-
-### Vercel Deployment Protection
-
-Vercel has a first-party feature for this called **Protection Bypass for Automation**.
-
-1. **Vercel project → Settings → Deployment Protection** → enable **Protection Bypass for Automation** → generate a secret.
-2. Add the secret to your GitHub repo secrets as `VERCEL_BYPASS_SECRET`.
-3. Pass it via `extra-headers`:
-
-   ```yaml
-   - uses: corralimited/snapdiff-action@v1
-     with:
-       api-key: ${{ secrets.SNAPDIFF_API_KEY }}
-       project: my-project
-       pages: |
-         home=/
-         pricing=/pricing
-       extra-headers: |
-         x-vercel-protection-bypass: ${{ secrets.VERCEL_BYPASS_SECRET }}
-         x-vercel-set-bypass-cookie: true
-   ```
-
-The header sets a session cookie on first hit, so subsequent assets (CSS, fonts, images) load without re-authenticating — important for full-page captures. Header values are not stored in the SnapDiff database.
-
-Reference: [Vercel Protection Bypass for Automation](https://vercel.com/docs/deployment-protection/methods-to-bypass-deployment-protection/protection-bypass-automation).
-
-### Cloudflare Access
-
-Use a service token. In the Cloudflare dashboard create a service token, then pass the resulting `CF-Access-Client-Id` and `CF-Access-Client-Secret`:
+If your preview is behind Vercel Deployment Protection, Cloudflare Access, basic auth, or any header-based bypass, drop the headers into `extra-headers:`:
 
 ```yaml
-extra-headers: |
-  CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-  CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+- uses: corralimited/snapdiff-action@v1
+  with:
+    api-key: ${{ secrets.SNAPDIFF_API_KEY }}
+    project: my-site
+    extra-headers: |
+      x-vercel-protection-bypass: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+      x-vercel-set-bypass-cookie: true
+    pages: |
+      homepage=/
 ```
 
-### Basic auth, custom tokens, IP allowlist headers
+Cloudflare Access uses the same pattern with `CF-Access-Client-Id` / `CF-Access-Client-Secret`. Header values are sent on every page capture and **not** persisted in SnapDiff's database.
 
-Any host that accepts a static header for authentication works the same way — drop the header into `extra-headers`.
+## Inputs
+
+| Input | Required | Default | Description |
+|---|---|---|---|
+| `api-key` | yes | — | Your SnapDiff API key (`sd_live_xxx`). Store in GitHub Secrets. |
+| `project` | yes | — | Project slug or ID |
+| `pages` | yes | — | Pages to test, one per line in `name=path` or `name=url` format |
+| `api-url` | no | `https://api.snapdiff.ai` | API base URL (override for self-hosted) |
+| `preview-url` | no | — | Skip auto-discovery and use this base URL |
+| `preview-environment` | no | `preview` on PRs, `production` otherwise | Filter GH deployment environment by substring (case-insensitive) |
+| `preview-timeout` | no | `10` | Max minutes to wait for a matching `success` deployment |
+| `extra-headers` | no | — | Headers applied to every capture, one per line as `Key: value` |
+| `viewport-width` | no | `1280` | Viewport width in CSS pixels |
+| `viewport-height` | no | `720` | Viewport height in CSS pixels |
+| `full-page` | no | `false` | Capture the entire scrollable page (vs. viewport only) |
+| `wait` | no | `true` | Wait for the build to finish diffing and report results |
+| `wait-timeout` | no | `5` | Max minutes to wait for build completion |
+| `github-token` | no | `${{ github.token }}` | Token used to read deployment statuses |
+
+## Outputs
+
+| Output | Description |
+|---|---|
+| `build-id` | The SnapDiff build ID |
+| `status` | Final build status (`approved`, `changes_requested`, `failed`) |
+| `changed-count` | Number of pages with visual changes |
+| `review-url` | URL to review the build in the SnapDiff dashboard |
+| `preview-url` | The base URL that was discovered (or the explicit `preview-url` input) |
+
+## What happens, end to end
+
+1. The action waits for a `success` deployment matching `preview-environment` on the PR's commit SHA.
+2. Captures every page in `pages:` using a Chromium browser running on the CI runner — fonts pinned, color profile sRGB, scrollbars hidden, network idled with a 5s cap.
+3. Uploads each PNG to `POST /v1/screenshot/upload` and collects the returned `screenshot_id`s.
+4. Creates a build via `POST /v1/projects/<project>/builds` referencing the screenshot IDs.
+5. Polls the build until SnapDiff finishes diffing.
+6. **No baselines exist yet (first run)**: all pages are auto-approved, baselines created.
+7. **Baselines exist + pages unchanged**: ✅ commit status `snapdiff/visual-test` → success.
+8. **Baselines exist + pages changed**: 🟡 commit status `snapdiff/visual-test` → pending. The workflow stays green; merge is blocked via the pending status until a reviewer approves at `review-url`.
+9. **Approving in the dashboard** updates the commit status to success and unblocks the merge.
 
 ## Merge gating
 
-When visual changes are detected, the workflow does not fail. Instead, SnapDiff posts a separate commit status named `snapdiff/visual-test` through the GitHub API:
+The workflow itself stays green regardless of visual changes — gating is done separately by the `snapdiff/visual-test` commit status. Add it as a required check under **Settings → Branches → Branch protection rules**.
 
-- **pending** — the build is processing, or changes are awaiting review
-- **success** — no changes detected, or all changes have been approved in the dashboard
-- **error** — the build failed for reasons unrelated to visual differences
+To enable status posting, connect a GitHub PAT under **Integrations** in the SnapDiff dashboard. The token requires the `repo:status` scope.
 
-Add `snapdiff/visual-test` as a required check in your branch protection rules. While the status is pending, the merge button is blocked. A reviewer opens the dashboard to approve changes (which become the new baseline) or reject them. Once approved, the status updates to success and the merge is unblocked.
+## When to use a different tool
 
-To enable status posting, connect a GitHub repository and personal access token under Integrations in the SnapDiff dashboard. The token requires the `repo:status` scope.
+This action is the right fit for diffing **public pages** on every PR. If you need something different:
 
-## Auto-discovery support
+- **[`@corralimited/snapdiff-playwright`](https://www.npmjs.com/package/@corralimited/snapdiff-playwright)** — write Playwright tests yourself. Required for routes behind a login wall, and the better fit for Storybook (loop over `index.json`).
+- **[`@corralimited/snapdiff-cli`](https://www.npmjs.com/package/@corralimited/snapdiff-cli)** — one-off `snapdiff diff` and `snapdiff diff-baseline` calls. Useful for shell scripts and local checks; SnapDiff captures the URL server-side.
 
-Auto-discovery relies on the GitHub Deployments API, which is populated by most modern hosts:
+## Troubleshooting
 
-| Host | Supported | Notes |
-| --- | --- | --- |
-| Vercel | yes | Push and pull request |
-| Netlify | yes | Push and pull request |
-| Cloudflare Pages | yes | Push and pull request |
-| AWS Amplify | yes | Push and pull request |
-| Render | yes | Push and pull request |
-| GitHub Pages | no | No pull request previews. Use full URLs in `pages`. |
-| FTP / custom | varies | Use full URLs, or set `preview-url` explicitly |
+**`No 'preview' deployment with state=success found`** — Your host isn't writing GitHub deployments, or it's deployed but the environment name doesn't match. Pass `preview-environment:` with whatever substring matches your env (`staging`, your Vercel project alias, etc.), or `preview-url:` to skip discovery.
 
-If your host does not publish GitHub deployments, provide a static `preview-url` or use full URLs in the `pages` input.
+**`Could not start chromium`** — Workflow runner ran out of disk. Add `- run: df -h` before the action step to confirm; usually a sibling step is leaving a fat install around.
+
+**Workflow times out waiting for build** — Bump `wait-timeout:` (default 5 min). Large builds — Storybook-style, 100+ pages — can take longer. Or set `wait: false` to fire and forget; the `snapdiff/visual-test` commit status will update asynchronously.
+
+**Every page reports "changed" on the first run** — Expected. First run on a new branch establishes baselines; second run diffs against them.
+
+**Headers in `extra-headers:` aren't being applied** — Each line must be a literal `Key: value` (no quotes, no trailing commas). Lines without a colon are silently dropped.
 
 ## License
 
-MIT
+MIT — see [LICENSE](./LICENSE).
