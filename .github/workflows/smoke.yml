@@ -1,0 +1,34 @@
+name: Smoke
+
+# Self-test: runs the action against a known target (snapdiff.ai) on every
+# PR and on every push to main. Catches regressions in action.yml or
+# runtime/capture-and-build.mjs before they reach customer CI.
+#
+# Requires repo secret SNAPDIFF_API_KEY scoped to project snapdiff-self-smoke
+# (or update `project:` below).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reference the action via local path so the smoke run tests the
+      # in-repo working tree, not a previously-tagged release.
+      - uses: ./
+        with:
+          api-key: ${{ secrets.SNAPDIFF_API_KEY }}
+          project: snapdiff-self-smoke
+          preview-url: https://snapdiff.ai
+          pages: |
+            home=/
+            privacy=/privacy
+            terms=/terms
